@@ -1,0 +1,1184 @@
+---
+title: "BANA 7050 Spring 2022: Final Project"
+author : "Ayesha Sareen"
+editor: visual
+format:
+  html:
+    code-fold: true
+    code-summary: "Show the code"
+    embed-resources : true
+    toc: true
+    toc-location: right
+    toc-title: Contents
+    toc-depth: 10
+    anchor-sections: true
+    highlight-style: github
+    link-external-icon: true
+    link-external-newwindow: true
+    callout-icon: false
+
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: refresh
+---
+
+# Cincinnati 311 Non-Emergency Service Requests - A Time Series Analysis
+
+The Cincinnati 311 Non-Emergency Service Requests dataset is procured from the City of Cincinnati open data website (<https://data.cincinnati-oh.gov/Thriving-Neighborhoods/Cincinnati-311-Non-Emergency-Service-Requests/4cjh-bm8b>). The dataset includes all non-emergency service request records submitted to the City of Cincinnati, together with information on the location, type, date, and time of the request as well as its status. The data is updated from 2012 to 2022.
+
+This dataset is an illustration of a real-world time-series dataset that can be used to examine and project the trends in service request patterns in a city. The data collection was probably influenced by a number of variables, including the city's service request system efficiency, weather, economic conditions, and population density.
+
+This dataset contains data on the non-emergency service requests submitted to the city of Cincinnati. The requests are made by a phone call, an online form, or in person. A particular department is then given responsibility for handling them. The requests are divided into many categories, including pothole repair, garbage pickup, and street light maintenance.
+
+The population density of various locations within the city, the condition of the infrastructure and public services, and the degree of knowledge and participation of the general public with the 311 service are likely to be some of the elements that influence the data-generation process for this dataset. The generation of data may also be influenced by environmental conditions and seasonality, since some requests may be more frequent at different times of year.
+
+The amount of requests filed by residents is probably what causes the variable to vary. The amount of requests made by citizens can vary, just as the population density of various sections of the city might. Additionally, the amount of requests filed by citizens may vary depending on the status of the public services and infrastructure in various regions.
+
+This variable is affected by a number of variables, some of which are difficult to forecast, such as natural catastrophes, weather, and population changes. Furthermore, the dataset lacks sufficient historical information, making it difficult to forecast how the time-series will behave going forward. There is also uncertainty regarding the occurrence of a non-emergency situation. However, with the appropriate methods and models, one might be able to create accurate short-term forecasts of the number of service requests submitted to the city.
+
+```{r message=FALSE, warning=FALSE, include= FALSE}
+
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(tsibble)
+library(psych)
+library("future")
+library("generics")
+library("fable")
+library("tsibbledata")
+library("fabletools")
+library("feasts")
+library(dplyr)
+library(lemon)
+library(gridExtra)
+library(tseries)
+library(prophet)
+library(data.table)
+library(knitr)
+```
+
+```{r message=FALSE, warning=FALSE, include= FALSE}
+# Importing data into dataframe
+
+req_df <- data.frame(read.csv("Cincinnati_311__Non-Emergency__Service_Requests.csv"))
+
+#str(req_df)
+#summary(req_df)
+#colnames(req_df)
+
+```
+
+```{r}
+data_mod_initial<-req_df %>%
+  dplyr::select(REQUESTED_DATE) %>%
+  mutate(DateTime = yearmonth(as.yearmon(mdy_hms(REQUESTED_DATE),"%m%Y"))) %>%
+  group_by(DateTime) %>%
+  summarise(Freq = n()) %>% 
+  arrange(DateTime) %>%
+  as_tsibble(index = DateTime)
+
+data_mod_initial <- data_mod_initial[-133,] #removing 2023 Jan data due to incompleteness
+
+#Line Chart of entire dataset
+data_mod_initial%>%
+  ggplot(aes(x=DateTime,y=Freq))+
+  geom_line()+
+  labs(title = "Time Series plot for Non-Emergency Requests over 2012-2022",
+       y = "Count of Non-Emergency Requests",
+       x = "Year-Month")+
+  geom_vline(xintercept=as.numeric(as.Date("2019-01-01")), color="black",
+             linetype = 2, lwd = 1.5)+
+  annotate("text", x=17000, y=2750, label= "Training-Period",
+           col="red", size=4, parse=TRUE)+
+  annotate("text", x=18750, y=2750, label= "Testing-Period",
+           col="red", size=4, parse=TRUE)+ 
+  theme_bw()
+```
+
+## Exploratory Data Analysis
+
+#### 1. Splitting data into training and testing
+
+```{r message=FALSE, warning=FALSE, include= FALSE}
+
+#use 70% of dataset as training set and 30% as test set
+train <- req_df%>%filter(REQUESTED_DATETIME < ymd('2019-01-01'))
+test <- req_df%>%filter(REQUESTED_DATETIME >= ymd('2019-01-01') & REQUESTED_DATETIME <= ymd('2022-12-31') )
+
+#converting data into monthly format
+data_mod<-train %>%
+  dplyr::select(REQUESTED_DATE) %>%
+  mutate(DateTime = yearmonth(as.yearmon(mdy_hms(REQUESTED_DATE),"%m%Y"))) %>%
+  group_by(DateTime) %>%
+  summarise(Freq = n()) %>% 
+  arrange(DateTime) %>%
+  as_tsibble(index = DateTime)
+
+```
+
+#### 2. Visualizing the data
+
+```{r message=FALSE, warning=FALSE}
+
+#Line Chart
+data_mod%>%
+  ggplot(aes(x=DateTime,y=Freq))+
+  geom_line()+
+  labs(title = "Time Series plot for Non-Emergency Requests over 2012-2018",
+       y = "Count of Non-Emergency Requests",
+       x = "Year-Month") + theme_bw()
+```
+
+> This line chart shows the number of non-Emergency requests over time. It clearly shows the seasonality of the data with higher numbers of requests during summer and lower numbers of requests during winter.
+
+```{r message=FALSE, warning=FALSE}
+
+train %>% 
+  dplyr::select(REQUESTED_DATE)%>%
+  mutate(DATE = as.Date(REQUESTED_DATE, format = "%m/%d/%Y")) %>%
+  count(DATE) %>%
+  group_by(month = lubridate::month(DATE), year= lubridate::year(DATE)) %>%
+  summarise(total = sum(n)) %>%
+  filter(year != 2023) %>%
+  ggplot(aes(x = month, y = total)) +
+  geom_line(color = "darkorchid4")+
+  geom_point(color = "darkorchid4")+
+  facet_wrap(~ year, ncol = 3) +
+  labs(title = "Non-Emergency Requests from 2012-2018",
+       y = "Count of Non-Emergency Requests",
+       x = "Month") + theme_bw() +
+  scale_x_continuous(breaks = c(1,4,7,10),
+                     labels = c("Jan","Apr","Jul","Oct"))
+```
+
+> The above plot shows the monthly trend across different years. This is in accordance with the previous plot to suggest that post the winter months, the frequency of requests increases.
+
+```{r message=FALSE, warning=FALSE}
+#training data summary stats
+
+summary(data_mod$Freq)
+```
+
+```{r message=FALSE, warning=FALSE}
+#Boxplot
+data_mod %>%
+  ggplot(aes(x = "", y = Freq)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of Non-Emergency Requests") +
+  xlab("x") +
+  ylab("Non-Emergency Requests")+
+  theme_bw()
+```
+
+> This boxplot shows the distribution of the number of service requests. It helps to identify any outliers in the data, which for this dataset aren't any.
+
+```{r message=FALSE, warning=FALSE}
+# Histogram
+p1<-data_mod %>%
+  ggplot(aes(Freq)) +
+  geom_histogram(bins = 40)+
+  theme_bw()+
+  ggtitle("Histogram of Requests") +
+  xlab("Non-Emergency Requests") +
+  ylab("Count")+
+  theme_bw()
+
+#density plot
+p2<-data_mod %>%
+  ggplot(aes(x = Freq)) +
+  geom_density() +
+  ggtitle("Density plot of Requests") +
+  xlab("Non-Emergency Requests") +
+  ylab("Density")+
+  theme_bw()
+
+grid.arrange(p1, p2, ncol = 2)
+
+```
+
+> The histogram and density plot shows the frequency of the number of service requests. It helps to identify the most common values and the spread of the data, which is mostly between 5000 to 11000.
+
+#### 3. Summary Statistics of the data
+
+```{r message=FALSE, warning=FALSE}
+# Create a table with summary statistics
+
+# summary_table <- (describe(data_mod$Freq))
+# summary_table
+
+summary <- data.frame(
+Observations = length(data_mod$Freq),
+Mean = mean(data_mod$Freq),
+Median = median(data_mod$Freq),
+Mode = names(which.max(table(data_mod$Freq))),
+Std_Dev = sd(data_mod$Freq),
+Range = range(data_mod$Freq))
+
+kable(summary)
+```
+
+::: callout-tip
+
+### Inference
+
+Based on the analysis of the data:
+
+-   There are no outliers
+
+-   The average number of requests is 8169
+
+This is in concurrence with the above visualizations
+
+:::
+
+## Time Series Decomposition
+
+```{r message=FALSE, warning=FALSE}
+Requests_MA <- data_mod %>%
+  dplyr::select(DateTime, srate = Freq) %>%
+  mutate(srate_ma05 = rollmean(srate, k = 35, fill = NA, align = "center"))
+
+```
+
+```{r message=FALSE, warning=FALSE}
+
+# Plot original time series and moving average
+ggplot() +
+  geom_line(aes(x = Requests_MA$DateTime, y = Requests_MA$srate, color = "Original Time Series"), size = 0.75) +
+  geom_line(aes(x = Requests_MA$DateTime, y = Requests_MA$srate_ma05, color = "Moving Average-35"), size = 0.75)  +
+  labs(title = "Original Time Series and Moving Average from 2012-2018",
+       y = "Count of Non-Emergency Requests",
+       x = "Year-Month",
+       colour = "Legend")+
+  theme_bw() 
+```
+
+> Post testing different moving averages, it was determined that Moving Average-35 represented the time series trend well.
+
+```{r message=FALSE, warning=FALSE}
+# Remainder
+Requests_MA$remainder <- Requests_MA$srate - Requests_MA$srate_ma05
+
+# Plot original time series, moving average and remainder
+ggplot() +
+  geom_line(aes(x = Requests_MA$DateTime, y = Requests_MA$srate, color = "Original Time Series"), size = 0.75) +
+  geom_line(aes(x = Requests_MA$DateTime, y = Requests_MA$srate_ma05, color = "Moving Average-35"), size = 0.75) +
+  geom_line(aes(x = Requests_MA$DateTime, y = Requests_MA$remainder, color = "Remainder"), size = 0.75)  +
+  labs(title = "Original Time Series, Moving Average, Remainder from 2012-2018",
+       y = "Count of Non-Emergency Requests",
+       x = "Year-Month",
+       colour = "Legend")+
+  theme_bw()
+```
+
+> It does appear that remainder may have certain pattern or seasonality that wasn't interpretative from the moving average. However, further analysis may be required.
+
+```{r message=FALSE, warning=FALSE}
+#Decomposition
+Requests_MA_decomp <- Requests_MA%>%
+  dplyr::select(DateTime, srate, srate_ma05,remainder)
+
+Requests_MA_decomp_plot <- Requests_MA_decomp %>%
+  pivot_longer(
+    srate:remainder,
+    names_to = "decomposition",
+    values_to = "srate"
+  ) %>%
+  mutate(
+    decomposition = case_when(
+      decomposition == "srate" ~ "Requests",
+      decomposition == "srate_ma05" ~ "Trend",
+      decomposition == "remainder" ~ "Remainder"
+    )
+  ) %>%
+  mutate(
+    decomposition = factor(
+      decomposition,
+      labels = c(
+        "Requests",
+        "Trend",
+        "Remainder"
+      ),
+      levels = c(
+        "Requests",
+        "Trend",
+        "Remainder"
+      )
+    )
+  ) %>%
+  ggplot() +
+  geom_line(aes(DateTime, srate), size = 1) +
+  facet_wrap(
+    ~decomposition,
+    nrow = 3,
+    scales = "free"
+  ) + 
+  theme_bw() +
+  xlab("Month") +
+  ggtitle(
+    "Requests = Trend + Remainder"
+  )
+
+Requests_MA_decomp_plot
+
+```
+
+> Upon observing the remainder component, there appears to be a weak seasonality in the time series, which is in accordance with the expectation.
+
+We can decompose the time series further to look for any seasonality that may exist.
+
+```{r message=FALSE, warning=FALSE}
+
+data_mod%>%
+  model(classical_decomposition(Freq)) %>%
+  components() %>%
+  autoplot() +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.background = element_rect(fill = "white") )+
+  labs(title = "Classical Decomposition",
+       subtitle = "Requests (Freq) = trend + seasonal + random",
+       y = "Count of Requests",
+       x = "Year-Month")
+```
+
+> As is evident from the seasonal component above, it is clear that there exists seasonality within the time series. The remainder or random now appears to be mostly white noise with no seeming pattern.
+
+```{r message = FALSE, warning=FALSE}
+#Lag plots
+classical_decomp <- data_mod %>%
+ model(
+    classical_decomposition(Freq,"additive")
+  ) %>%
+  components()
+
+stl_decomp <- data_mod %>%
+  model(
+    STL(Freq)
+  ) %>%
+  components()
+
+classical_decomp %>%
+  gg_lag(Freq, geom = "point", lags = 1:12)+
+  geom_smooth(aes(color=NULL),method='lm',color='red',se=F)+
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(size = 9, angle = 315, vjust = -0.5, hjust=0.75),
+    axis.text.y = element_text(),
+    plot.background = element_rect(fill = "white") )+
+  labs(title = "Lag Plot for Classical Decomposition",
+       y = "Non-Emergency Requests",
+       x = "lag(Freq,n)")
+
+
+```
+
+The visual above shows that 'lag 1' has some autocorrelation. This indicates that the previous time period is good to forecast future values, but not the other lag time periods.
+
+::: callout-tip
+
+### Inference
+
+Based upon the decomposed time series, it has been noted:
+
+-   Time series appears to have weak seasonality
+
+-   Previous time period or lag 1 influences the data point
+
+:::
+
+## ARIMA Model
+
+```{r message=FALSE, warning=FALSE}
+
+#Line Chart
+data_mod%>%
+  ggplot(aes(x=DateTime,y=Freq))+
+  geom_line()+
+  geom_hline(yintercept=mean(data_mod$Freq), col = 'blue')+
+  labs(title = "Time Series plot for Non-Emergency Requests over 2012-2018",
+       y = "Count of Non-Emergency Requests",
+       x = "Year-Month") + theme_bw()
+
+```
+
+> Looking at the above time series graphic, it can be said that the data is stationary, in both mean and variance. The blue line indicates the mean and thus, it can be observed that the time series is mean-reverting with the peaks and lows returning back to the average over time.
+
+### 1. Variance Stationarity using Rolling Window
+
+Further, an assessment of variance stationarity can be conducted using different rolling windows. We observed that the higher the rolling window, the more induced non-stationarity is observed. However, since this is a 10-year dataset, a 7 month rolling window could be observed.
+
+```{r message=FALSE, warning=FALSE}
+
+data_mod_roll <- data_mod %>%
+  mutate(
+    freq_mean = zoo::rollmean(
+      Freq, 
+      k = 7, 
+      fill = NA),
+    freq_sd = zoo::rollapply(
+      Freq, 
+      FUN = sd, 
+      width = 7, 
+      fill = NA)
+  )
+data_modsd <- data_mod_roll%>%
+  ggplot() +
+  geom_line(aes(DateTime, freq_sd)) +
+  geom_smooth(aes(DateTime,freq_sd),method='lm',se=F)+
+  theme_bw() +
+  ggtitle("Non-Emergency Requests over time (7 month rolling window)") +
+  ylab("Count of Non-Emergency Requests") +
+  xlab("Year-Month")
+
+data_modsd
+```
+
+> The above plot shows that the data is variance stationary.
+>
+> This is in accordance with the visual inference from the original time series plot, wherein it appeared to be both mean and variance stationary.
+
+### 2. Mean Stationarity using KPSS & ADF tests
+
+We can even verify this using statistical tests such as KPSS and Augmented Dickey-Fuller tests.
+
+```{r message=FALSE, warning=FALSE}
+
+data_mod %>%
+  features(Freq, unitroot_kpss)
+
+adf.test(data_mod$Freq)
+```
+
+> Since p-value is \<0.05 for the KPSS test, we consider that the time series is mean non-stationary. But p-value is \<0.05 for ADF test, it indicates that the time series is mean stationary.
+>
+> We consider the results of both the tests and conclude that the time series is stationary. This is in accordance with the visual inference from the original time series plot, wherein it appeared to be both mean and variance stationary.
+
+::: callout-tip
+
+### Note
+
+Had the time series been mean or variance non-stationary, Box-Cox or Log transformations would have been conducted, which for this time series are avoidable.
+
+:::
+
+```{r message=FALSE, warning=FALSE}
+
+ACF1 <- acf(data_mod$Freq, plot=FALSE)
+plot(ACF1, main = "Non-Emergency Requests Time Series ACF")
+```
+
+> As can be noted from the above ACF plot, there appears to be weak seasonality in the time series, which exists at lag 12. Therefore, we would difference it to reduce the impact of the same.
+
+### 3. Seasonal differencing
+
+```{r message=FALSE, warning=FALSE}
+
+# Perform seasonal differencing 
+data_mod['seasonal_diff'] <- as.data.frame(difference(data_mod$Freq, lag = 12))
+temp = data_mod[13:nrow(data_mod), ]
+
+# Plot the time series after seasonal differencing 
+ggplot(data = temp, 
+       aes(x = DateTime, 
+           y = seasonal_diff)) +
+  geom_line() + 
+  ggtitle("Time Series after Seasonal Differencing at Lag 12") + 
+  xlab("Year-Month") + 
+  ylab("Non-Emergency Requests")+
+  theme_bw()
+
+```
+
+```{r message = FALSE, warning=FALSE}
+data_mod %>%
+  gg_tsdisplay(seasonal_diff,
+               plot_type='partial', lag=36) +
+  labs(title="Seasonally differenced", y="")
+```
+
+```{r message = FALSE, warning=FALSE}
+
+data_mod %>% features(seasonal_diff, unitroot_kpss)
+adf.test(temp$seasonal_diff)
+
+```
+
+> Since p-value is \>0.05 for the KPSS test, we consider that the time series is mean stationary. But p-value is \>0.05 for ADF test, it indicates that the time series is mean non-stationary.
+>
+> We consider the results of both the tests and conclude that the time series is stationary.
+
+### 4. ACF/PACF plots
+
+Now, we can examine the ACF/PACF plots for assessment of potential ARIMA models to fit on this data.
+
+```{r}
+par(mfrow = c(1,2))
+
+ACF2<- acf(temp$seasonal_diff, lag.max = 24, plot=FALSE)
+plot(ACF2, main = "Seasonally differenced ACF")
+
+PACF2<- pacf(temp$seasonal_diff, lag.max = 24, plot=FALSE)
+plot(PACF2, main = "Seasonally differenced PACF")
+```
+
+> As per the ACF plot, there appears to be a diminishing effect. Hence, we can conclude that this is an AR process. The PACF plot suggests that the order could be 1.
+>
+> It can be inferred that this time series is ARIMA(1,1,0). Since there exists weak seasonality as well at lag 12, there may also exist seasonal ARIMA effects of the order (0,1,0).
+
+```{r message = FALSE, warning=FALSE}
+# Order = p,d,q (AR, I, MA)
+models_bic = data_mod %>%
+  model(
+    mod1 = ARIMA(Freq~pdq(1,0,0)+PDQ(0,1,0)),
+    mod2 = ARIMA(Freq~pdq(1,1,1)+PDQ(0,1,0)),
+    mod3 = ARIMA(Freq~pdq(1,1,0)+PDQ(0,1,0)),
+    mod4 = ARIMA(Freq~pdq(2,1,0)+PDQ(0,1,0)),
+    mod5 = ARIMA(Freq~pdq(2,1,1)+PDQ(0,1,0)),
+    mod6 = ARIMA(Freq~pdq(2,0,0)+PDQ(0,1,0))
+    )
+
+
+models_bic%>%
+  glance() %>%
+  arrange(BIC)
+```
+
+> It appears that ARIMA(1,1,1) model with seasonal component (0,1,0) seems to be the best according to the BIC.
+
+```{r message = FALSE, warning=FALSE}
+best_mod = data_mod %>%
+  model(ARIMA(Freq~pdq(1,1,1)+PDQ(0,1,0),approximation = F, stepwise = F))
+
+# Get fitted values
+fitted = best_mod %>%
+  augment() %>%
+  .$.fitted
+
+ggplot() +
+  geom_line(aes(data_mod$DateTime, data_mod$Freq)) +
+  geom_line(aes(data_mod$DateTime, fitted), color = "blue", alpha = 0.4) +
+  theme_bw() +
+  xlab("Year-Month") +
+  ylab("Non-Emergency Requests")+ 
+  ggtitle("Original Time Series vs Predicted Time Series [ARIMA(1,1,1)(0,1,0)]")
+```
+
+> The predicted values do seem to somewhat follow the trend in the original data. However, it would be better to assess the residuals from this model as well.
+
+```{r}
+best_mod %>%
+  gg_tsresiduals() +
+  labs(title="Residual Analysis", y="")
+```
+
+::: callout-important
+
+### Attention
+
+As we see above, Residuals show strong autocorrelation at lag 12, indicating there is not white noise, and there still exists some autocorrelation between the residuals. Hence, it is not a good idea to retain the current model.
+
+:::
+
+### 5. Box-Ljung test for Residual autocorrelation
+
+To ascertain this, we can even conduct a Box-Ljung test for autocorrelation verification in the residuals.
+
+```{r}
+lag1 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 1, dof = 1)
+
+lag2 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 2, dof = 1)
+
+lag3 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 3, dof = 1)
+
+lag4 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 4, dof = 1)
+
+lag5 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 5, dof = 1)
+
+lag6 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 6, dof = 1)
+
+lag7 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 7, dof = 1)
+
+lag8 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 8, dof = 1)
+
+lag9 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 9, dof = 1)
+
+lag10 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 10, dof = 1)
+
+lag11 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 11, dof = 1)
+
+lag12 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 12, dof = 1)
+
+lag13 = best_mod %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 13, dof = 1)
+
+
+table_resid <- data.frame(lag = c(1,2,3,4,5,6,7,8,9,10,11,12,13),
+                          lb_stat = c(lag1$lb_stat,lag2$lb_stat,lag3$lb_stat,lag4$lb_stat,lag5$lb_stat,lag6$lb_stat,lag7$lb_stat,lag8$lb_stat,lag9$lb_stat,lag10$lb_stat,lag11$lb_stat,lag12$lb_stat,lag13$lb_stat),
+                          pvalue = c(lag1$lb_pvalue,lag2$lb_pvalue,lag3$lb_pvalue,lag4$lb_pvalue,lag5$lb_pvalue,lag6$lb_pvalue,lag7$lb_pvalue,lag8$lb_pvalue,lag9$lb_pvalue,lag10$lb_pvalue,lag11$lb_pvalue,lag12$lb_pvalue,lag13$lb_pvalue),
+                          residual_autocorrelation = c(lag1$lb_pvalue < 0.05,lag2$lb_pvalue < 0.05,lag3$lb_pvalue < 0.05,lag4$lb_pvalue < 0.05,lag5$lb_pvalue < 0.05,lag6$lb_pvalue < 0.05,lag7$lb_pvalue < 0.05,lag8$lb_pvalue < 0.05,lag9$lb_pvalue < 0.05,lag10$lb_pvalue < 0.05,lag11$lb_pvalue < 0.05,lag12$lb_pvalue < 0.05,lag13$lb_pvalue < 0.05))
+
+
+print(table_resid)
+
+
+```
+
+> Since p-value is \<0.05, there appears to be residual autocorrelation at lag 1, 12 and 13. Hence, this model is not the best ARIMA model.
+
+### 6. Automated ARIMA for best results
+
+In order to predict the best ARIMA model, we can use the automated ARIMA tool on the original dataset.
+
+```{r}
+best_mod2 = data_mod %>%
+  model(
+    fable::ARIMA(Freq,approximation=F,
+    stepwise=F)
+  )
+
+best_mod2%>% 
+  report()
+```
+
+> The output above suggests that ARIMA(3, 0, 0) with seasonal components(2, 1, 0) is the best fit model. This means that our time series has an auto-regressive and a moving average process, both. Also, it has a seasonal component as well.
+>
+> In a summary, *ARIMA(3,0,0)(2,1,0)\[12\]* is a type of ARIMA model that considers the past three values and the past two values of the seasonal component for its predictions.
+
+```{r}
+best_mod2 %>%
+  gg_tsresiduals() +
+  labs(title="Residual Analysis", y="")
+```
+
+> The residuals do suggest white noise for the model suggested above i.e. ARIMA(3,0,0)(2,1,0). We can also validate this statistically with the Box-Ljung test.
+
+```{r}
+lag_1 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 1, dof = 1)
+
+lag_2 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 2, dof = 1)
+
+lag_3 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 3, dof = 1)
+
+lag_4 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 4, dof = 1)
+
+lag_5 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 5, dof = 1)
+
+lag_6 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 6, dof = 1)
+
+lag_7 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 7, dof = 1)
+
+lag_8 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 8, dof = 1)
+
+lag_9 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 9, dof = 1)
+
+lag_10 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 10, dof = 1)
+
+lag_11 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 11, dof = 1)
+
+lag_12 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 12, dof = 1)
+
+lag_13 = best_mod2 %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 13, dof = 1)
+
+
+table_resid2 <- data.frame(lag = c(1,2,3,4,5,6,7,8,9,10,11,12,13),
+                          lb_stat = c(lag_1$lb_stat,lag_2$lb_stat,lag_3$lb_stat,lag_4$lb_stat,lag_5$lb_stat,lag_6$lb_stat,lag_7$lb_stat,lag_8$lb_stat,lag_9$lb_stat,lag_10$lb_stat,lag_11$lb_stat,lag_12$lb_stat,lag_13$lb_stat),
+                          pvalue = c(lag_1$lb_pvalue,lag_2$lb_pvalue,lag_3$lb_pvalue,lag_4$lb_pvalue,lag_5$lb_pvalue,lag_6$lb_pvalue,lag_7$lb_pvalue,lag_8$lb_pvalue,lag_9$lb_pvalue,lag_10$lb_pvalue,lag_11$lb_pvalue,lag_12$lb_pvalue,lag_13$lb_pvalue),
+                          residual_autocorrelation = c(lag_1$lb_pvalue < 0.05,lag_2$lb_pvalue < 0.05,lag_3$lb_pvalue < 0.05,lag_4$lb_pvalue < 0.05,lag_5$lb_pvalue < 0.05,lag_6$lb_pvalue < 0.05,lag_7$lb_pvalue < 0.05,lag_8$lb_pvalue < 0.05,lag_9$lb_pvalue < 0.05,lag_10$lb_pvalue < 0.05,lag_11$lb_pvalue < 0.05,lag_12$lb_pvalue < 0.05,lag_13$lb_pvalue < 0.05))
+
+
+knitr::kable(print(table_resid2))
+
+
+```
+
+> Since p-value is \<0.05, there appears to be residual autocorrelation at lag 1 only.
+
+```{r}
+# Get fitted values
+fitted2 = best_mod2 %>%
+  augment() %>%
+  .$.fitted
+
+ggplot() +
+  geom_line(aes(data_mod$DateTime, data_mod$Freq)) +
+  geom_line(aes(data_mod$DateTime, fitted2), color = "blue", alpha = 0.4) +
+  theme_bw() +
+  xlab("Year-Month") +
+  ylab("Non-Emergency Requests")+
+  ggtitle("Original Time Series vs Predicted Time Series [ARIMA(3,0,0)(2,1,0)]")
+```
+
+> However, the forecast seems very reasonable to have followed the trends and patterns of the original time series very closely. Hence, the ***model ARIMA(3,0,0)(2,1,0)\[12\]*** is good to be considered.
+
+::: callout-tip
+
+### Inference 
+
+ARIMA Model suggests that:
+
+-   ARIMA(3,0,0)(2,1,0)\[12\] is the best for this dataset
+
+-   Residuals suggest white noise
+
+:::
+
+## Meta Prophet Model
+
+::: callout-note
+
+### Note
+
+Prophet model is known to work effectively on daily data. We would thus consider the 311 Non-Emergency Service Requests dataset as it is, since it is already daily data.
+
+:::
+
+```{r warning =FALSE}
+data_mod2 <- train %>%
+  dplyr::select(REQUESTED_DATE) %>%
+  dplyr::mutate(DateTime = as.Date(mdy_hms(REQUESTED_DATE),"%m/%d/%Y")) %>%
+  group_by(DateTime) %>%
+  dplyr::summarize(Freq = n()) %>%
+  arrange(DateTime) %>%
+  as_tsibble(index = DateTime)
+
+prophet_data = data_mod %>% 
+    rename(ds = DateTime, # Have to name our date variable "ds"
+    y = Freq)
+```
+
+```{r}
+#Line Chart
+data_mod2%>%
+  ggplot(aes(x=DateTime,y=Freq))+
+  geom_point()+
+  labs(title = "Time Series plot for Non-Emergency Requests over 2012-2018 (Daily)",
+       y = "Count of Non-Emergency Requests",
+       x = "Year-Month") + theme_bw()
+```
+
+> The best Prophet model would require the following parameters:
+>
+> -   no. of changepoints and associated hyperparameters
+>
+> -   growth i.e. linear/logistic
+>
+> -   seasonality type i.e. additive/multiplicative
+>
+> To assess the best parameters for a best fit model, we would separately investigate how different values for the above parameters influence our model predictions. We would then compare the RMSE, MAE and MAPE statistics for each of the different parameter values. These statistics are based upon the residuals/errors, in essence.
+
+### **1. Number of Changepoints**
+
+```{r message=FALSE, warning=FALSE}
+
+# automated changepoint detection
+# library(changepoint)
+# cp = cpt.mean(prophet_data$y)
+# print(cp)
+
+
+# Number of Changepoints = 25
+
+orig_model = prophet::prophet(prophet_data) # Train Model
+
+orig_future = make_future_dataframe(orig_model,periods = 365, freq= 'days') # Create future dataframe for predictions
+
+orig_forecast = predict(orig_model,orig_future) # Get forecast
+
+
+
+plot(orig_model,orig_forecast)+
+  add_changepoints_to_plot(orig_model)+
+  theme_bw()+
+  xlab("Year")+
+  ylab("Requests")+ 
+  ggtitle("Prophet Forecast with default Changepoints")
+
+prophet_plot_components(orig_model, orig_forecast)
+
+
+```
+
+> The default changepoints highlight only 2 points, whereas as per automated changepoint detection, there were 15 changepoints detected.
+>
+> As was noted in the time-series, the frequency of requests is higher for the summer months and lower for the winter months.
+
+### 2. Hyperparameters - Range & Flexibility
+
+We can even change certain hyperparameters like range and flexibility to assess further.
+
+```{r message=FALSE, warning=FALSE}
+
+# Number of Changepoints & Hyperparameters changed
+model = prophet::prophet(prophet_data, n.changepoints = 15, changepoint.prior.scale = 0.09, changepoint.range = 0.7)
+
+forecast = predict(model,orig_future)
+
+plot(model,forecast)+
+  add_changepoints_to_plot(model)+
+  theme_bw()+
+  xlab("Year")+
+  ylab("Requests")+ 
+  ggtitle("Prophet Forecast with changed Hyperparameters")
+
+prophet_plot_components(model, forecast)
+```
+
+> Upon changing the hyperparameters (n.changepoints = 15, changepoint.prior.scale = 0.09, changepoint.range = 0.7), one can note that there has been the detection of only 1 significant changepoints and a more steeper trend in the time series. Higher number of changepoints could lead to overfitting.
+
+### 3. Saturating Points
+
+```{r message=FALSE, warning=FALSE}
+
+# Set "floor" in training data
+prophet_data$floor = 0
+prophet_data$cap = 30000
+orig_future$floor = 0
+orig_future$cap = 30000
+
+# Set floor in forecast data
+orig_future$floor = 0
+orig_future$cap = 30000
+
+logistic_model = prophet::prophet(prophet_data,growth='logistic')
+
+logistic_forecast = predict(logistic_model,orig_future)
+
+plot(logistic_model,logistic_forecast)+
+  # ylim(0,800)+
+  theme_bw()+
+  xlab("Year")+
+  ylab("Requests")+
+  ggtitle("Forecast with Saturation Points")
+```
+
+> Since the count of requests always has to be zero or a positive integer, a floor value has been set at 0. Alongside, a cap must also be set, which for now is at a 30,000. We have applied growth = 'logistic' in the model due to inclusion of floor value.
+
+```{r message=FALSE, warning=FALSE}
+additive = prophet::prophet(prophet_data)
+add_fcst = predict(additive,orig_future)
+
+plot(additive,add_fcst)+
+  theme_bw()+
+  xlab("Year")+
+  ylab("Requests")+
+  ggtitle("Forecast with Additive Seasonality")
+
+prophet_plot_components(additive,add_fcst)
+```
+
+```{r message=FALSE, warning=FALSE}
+multi = prophet::prophet(prophet_data,seasonality.mode = 'multiplicative')
+multi_fcst = predict(multi,orig_future)
+
+plot(multi,multi_fcst)+
+  theme_bw()+
+  xlab("Year")+
+  ylab("Requests")+
+  ggtitle("Forecast with Multiplicative Seasonality")
+
+prophet_plot_components(multi,multi_fcst)
+```
+
+The component plots for additive and multiplicative seasonality incorporated models do not have much difference in the components.
+
+### 4. Holiday Data
+
+```{r message=FALSE, warning=FALSE}
+model_holiday = prophet::prophet(prophet_data,fit=FALSE, seasonality.mode = 'additive')
+
+model_holiday = add_country_holidays(model_holiday,country_name = 'US')
+
+model_holiday = fit.prophet(model_holiday,prophet_data)
+
+forecast_holiday = predict(model_holiday,orig_future)
+
+prophet_plot_components(model_holiday,forecast_holiday)
+```
+
+> Considering Additive seasonality, we have incorporated the holidays data. As is visible in the holidays component, there is a drop in the number of requests once a year, atleast. We can, further, specify this holiday below.
+
+```{r warning=FALSE}
+forecast_holiday %>%
+  filter(holidays != 0) %>%
+  dplyr::select(-ds:-additive_terms_upper, -holidays:-holidays_upper, -contains("upper"), -contains("lower")) %>%
+  mutate_all(~ if_else(. == 0, as.numeric(NA), .)) %>%
+  summarize_if(is.numeric, ~ max(., na.rm = T)) %>%
+  pivot_longer(
+    cols = `Christmas Day`:`Washington's Birthday`,
+    names_to = 'holiday', 
+    values_to = 'effect'
+  ) %>%
+ggplot() +
+  geom_col(aes(effect,holiday))+
+  theme_bw()+
+  ggtitle("US Holiday effects on Frequency of Requests")
+```
+
+In concurrence with the decomposed plot, New Year's Day (Jan 1) influences a substantial drop in the frequency of requests received. 
+
+::: callout-warning
+
+### Note on Holidays Assessment
+
+At this point it makes sense to include January 1 in our data. It would ideally depend upon the time period of our forecast that would help determine whether we should drop or include Jan 1.
+
+:::
+
+### 5. Cross-validating for best model parameters
+
+We could choose the most influential aspects within the prophet model by cross-validating upon the training data and assessing statistics like RMSE, MAE, MAPE.
+
+```{r message=FALSE, warning=FALSE}
+
+df_cv1 <- cross_validation(additive, initial = 3*365, period = 90, horizon = 365, units = 'days')
+metrics1 = performance_metrics(df_cv1, rolling_window = 0.5) %>% 
+  mutate(model = 'Additive')
+
+df_cv2 <- cross_validation(multi, initial = 3*365, period = 90, horizon = 365, units = 'days')
+metrics2 = performance_metrics(df_cv2, rolling_window = 0.5) %>% 
+  mutate(model = "Multiplicative")
+
+
+g1=metrics1 %>% 
+bind_rows(metrics2) %>% 
+ggplot()+
+geom_line(aes(horizon,rmse,color=model))+
+  theme_bw()+
+  xlab("Horizon (days)")+
+  ylab("RMSE")
+
+g2 = metrics1 %>% 
+bind_rows(metrics2) %>% 
+ggplot()+
+geom_line(aes(horizon,mae,color=model))+
+  theme_bw()+
+  xlab("Horizon (days)")+
+  ylab("MAE")
+
+g3 = metrics1 %>% 
+bind_rows(metrics2) %>% 
+ggplot()+
+geom_line(aes(horizon,mape,color=model))+
+  theme_bw()+
+  xlab("Horizon (days)")+
+  ylab("MAPE")
+
+grid_arrange_shared_legend(g1, g2, g3, ncol = 2, nrow = 2, position='right', top = "Comparison of Additive vs Multiplicative Seasonality")
+```
+
+> As can be noted from the three plots, *Additive seasonality* is most explanatory for this data.
+
+```{r message=FALSE, warning=FALSE}
+old_changepoint_mod = prophet::prophet(prophet_data)
+
+df_cv5 <- cross_validation(old_changepoint_mod, initial = 3*365, period = 90, horizon = 365, units = 'days')
+metrics5 = performance_metrics(df_cv5, rolling_window = 0.5) %>% 
+  mutate(model = '25 changepoints & default hyperparameters')
+
+new_changepoint_mod = prophet::prophet(prophet_data, n.changepoints = 15, changepoint.prior.scale = 0.09, changepoint.range = 0.7)
+
+df_cv6 <- cross_validation(new_changepoint_mod, initial = 3*365, period = 90, horizon = 365, units = 'days')
+metrics6 = performance_metrics(df_cv6, rolling_window = 0.5) %>% 
+  mutate(model = "15 changepoints & changed hyperparameters")
+
+
+g7=metrics5 %>% 
+bind_rows(metrics6) %>% 
+ggplot()+
+geom_line(aes(horizon,rmse,color=model))+
+  theme_bw()+
+  xlab("Horizon (days)")+
+  ylab("RMSE")
+
+g8 = metrics5 %>% 
+bind_rows(metrics6) %>% 
+ggplot()+
+geom_line(aes(horizon,mae,color=model))+
+  theme_bw()+
+  xlab("Horizon (days)")+
+  ylab("MAE")
+
+g9 = metrics5 %>% 
+bind_rows(metrics6) %>% 
+ggplot()+
+geom_line(aes(horizon,mape,color=model))+
+  theme_bw()+
+  xlab("Horizon (days)")+
+  ylab("MAPE")
+
+grid_arrange_shared_legend(g7, g8, g9, ncol = 2, nrow = 2, position='right', top = "Comparison with changepoints and hyperparameters")
+```
+
+> All three plots suggest that *lower number of changepoints* are better at describing the alterations in the trend.
+
+::: callout-tip
+
+### Inference
+
+It can, thus, be concluded that the best prophet model must include 15 changepoints and the new hyperparameters, additive seasonality and logistic growth.
+
+***best_fit_model = prophet::prophet(prophet_data, n.changepoints = 15, growth = 'logistic', seasonality.mode = 'additive')***
+
+:::
+
+## Model Comparison and Validation
+
+To assess and compare the performance of the selected ARIMA and Prophet model versus a naive model, it is required to conduct cross-validation on the time series data. From the training data, an initial period of 3 years is used to train the model, and a 6 month period is iterated upon. Finally, a 6 month forecast is conducted using this dataset, in every iteration.
+
+```{r}
+cv_data = data_mod %>%
+  stretch_tsibble(.init = 36, .step = 6)
+```
+
+```{r}
+cv_forecast = cv_data %>%
+  model(snaive = SNAIVE(Freq),
+  arima = fable::ARIMA(Freq,approximation=F, stepwise=F)) %>%
+  forecast(h = 6)
+```
+
+```{r warning =FALSE}
+accuracy_forecast<-cv_forecast%>%
+  accuracy(data_mod) %>%
+  data.table::data.table()%>%
+  dplyr::select(.model,RMSE)
+
+knitr::kable(accuracy_forecast)
+```
+
+```{r message=FALSE, warning=FALSE}
+best_fit_model = prophet::prophet(prophet_data, n.changepoints = 15, growth = 'logistic', seasonality.mode = 'additive')
+
+df.cv <- cross_validation(best_fit_model, initial = 3*365, period = 180, horizon = 365/2, units = 'days')
+
+metrics = performance_metrics(df.cv, rolling_window = 0.3) %>% 
+  mutate(model = "Best Fit Model")
+
+print(paste("RMSE for Best Fit Prophet Model:", round(mean(metrics$rmse),3)))
+```
+
+```{r message=FALSE, warning=FALSE}
+
+accuracy_tbl <- data.frame(model= c('snaive','arima','prophet'),
+                           RMSE = c(accuracy_forecast$RMSE[2],accuracy_forecast$RMSE[1], round(mean(metrics$rmse),3)))
+
+knitr::kable(accuracy_tbl%>%
+  arrange(RMSE))
+```
+
+::: callout-tip
+
+### Inference
+
+As a result of the cross-validation, it can be seen that the SNAIVE model has the lowest RMSE, implying this is the best model for our time series.
+
+:::
+
+## Forecast
+
+As the SNAIVE model has been deduced as the best model, it can now be run on the test data (i.e. data over 2019/01/01). Further, a 1 year forecast has also been predicted for the year 2023.
+
+```{r message=FALSE, warning=FALSE}
+
+test_set<-test %>%
+  dplyr::select(REQUESTED_DATE) %>%
+  mutate(DateTime = yearmonth(as.yearmon(mdy_hms(REQUESTED_DATE),"%m%Y"))) %>%
+  group_by(DateTime) %>%
+  summarise(Freq = n()) %>% 
+  arrange(DateTime) %>%
+  as_tsibble(index = DateTime)
+
+data_mod %>% 
+  model(
+  SNAIVE(Freq)) %>%
+  forecast(h=60) %>%
+  accuracy(test_set)%>%
+  data.table::data.table()%>%
+  dplyr::select(.model,RMSE, MAE, MAPE)
+```
+
+> The SNAIVE model performs with an RMSE of 1737 on the test data.
+>
+> A graphical representation of the out-of-sample data and a 1 year forecast for the year 2023 has been created below.
+
+```{r warning=FALSE}
+#SNaive Forecast
+data_mod %>% 
+  model(
+  SNAIVE(Freq)) %>%
+  forecast(h=60) %>%
+  autoplot(test_set%>%
+             bind_rows(data_mod))+
+  theme_bw()+
+  labs(title = "Naive Forecast with Seasonality",
+       y = "Non-Emergency Requests",
+       x = "Year-Month")
+#scale_x_yearmonth(c("2012 Jan","2014 Jan","2016 Jan", "2018 Jan", "2020 Jan"))
+```
+
+::: callout-tip
+
+### Conclusion
+
+In year 2023, for the Cincinnati 311 Non-Emergency Service Requests dataset, the frequency of non-emergency requests would be between the range 7500-12500 with a high forecasting error.
+
+:::
